@@ -36,17 +36,19 @@ const String topic_prefix = "keybus/" + board_id + "/";
 const char CONFIG_FILE[] PROGMEM = "/config.json";
 
 void update_bool(const bool & value, bool & changed, const bool force, const String & topic) {
-    if (!changed && !force)
+    if (!changed && !force) {
         return;
+    }
 
     changed = false;
-    syslog.printf("%s: %s\n", topic.c_str(), value ? "ON": "OFF");
-    mqtt.publish(topic_prefix + topic, value ? "ON": "OFF", 0, true);
+    mqtt.publish(topic_prefix + topic, value ? "ON" : "OFF", 0, true);
 }
 
-void update_bitmask(const byte values[], bool & global_changed, byte changed[], std::map<int, String> ids, const bool force, const String & topic) {
-    if (!global_changed && !force)
+void update_bitmask(const byte values[], bool & global_changed, byte changed[], std::map<int, String> ids,
+                    const bool force, const String & topic) {
+    if (!global_changed && !force) {
         return;
+    }
 
     global_changed = false;
 
@@ -57,7 +59,7 @@ void update_bitmask(const byte values[], bool & global_changed, byte changed[], 
         const byte mask = 1 << position;
         if ((changed[group] & mask) || force) {
             changed[group] &= ~mask;
-            mqtt.publish(topic_prefix + topic + String(element.first), values[group] & mask ? "ON": "OFF", 0, true);
+            mqtt.publish(topic_prefix + topic + String(element.first), values[group] & mask ? "ON" : "OFF", 0, true);
         }
     }
 }
@@ -77,20 +79,22 @@ const char * get_state() {
     }
 
     if (dsc.armed[partition]) {
-        if ((dsc.armedAway[partition] || dsc.armedStay[partition]) && dsc.noEntryDelay[partition])
+        if ((dsc.armedAway[partition] || dsc.armedStay[partition]) && dsc.noEntryDelay[partition]) {
             return "armed_night";
-        else if (dsc.armedAway[partition])
+        } else if (dsc.armedAway[partition]) {
             return "armed_away";
-        else if (dsc.armedStay[partition])
+        } else if (dsc.armedStay[partition]) {
             return "armed_home";
+        }
     }
 
     return "disarmed";
 }
 
-void update(const bool force=false) {
-    if (!dsc.statusChanged && !force)
+void update(const bool force = false) {
+    if (!dsc.statusChanged && !force) {
         return;
+    }
 
     dsc.statusChanged = false;
 
@@ -100,12 +104,12 @@ void update(const bool force=false) {
 
     if (!dsc.disabled[partition]) {
         if (force
-            || dsc.alarmChanged[partition]
-            || dsc.armedChanged[partition]
-            || dsc.entryDelayChanged[partition]
-            || dsc.exitDelayChanged[partition]
-            || dsc.fireChanged[partition]
-            ) {
+                || dsc.alarmChanged[partition]
+                || dsc.armedChanged[partition]
+                || dsc.entryDelayChanged[partition]
+                || dsc.exitDelayChanged[partition]
+                || dsc.fireChanged[partition]
+           ) {
 
             dsc.alarmChanged[partition] = false;
             dsc.armedChanged[partition] = false;
@@ -123,11 +127,11 @@ void update(const bool force=false) {
 }
 
 PicoUtils::Watch<bool> connected_watch(
-        []{ return dsc.keybusConnected; },
-        [](bool connected) {
-            keybus_led_blinker.set_pattern(connected ? 1 : 0b10);
-            mqtt.publish(topic_prefix + "connected", connected ? "ON" : "OFF", 0, true);
-        });
+    [] { return dsc.keybusConnected; },
+[](bool connected) {
+    keybus_led_blinker.set_pattern(connected ? 1 : 0b10);
+    mqtt.publish(topic_prefix + "connected", connected ? "ON" : "OFF", 0, true);
+});
 
 namespace HomeAssistant {
 
@@ -318,7 +322,7 @@ void setup() {
 
     reset_button.init();
     wifi_control.init(button);
-    wifi_control.get_connectivity_level = []{
+    wifi_control.get_connectivity_level = [] {
         return mqtt.connected() ? 2 : 1;
     };
 
@@ -346,6 +350,57 @@ void setup() {
         connected_watch.fire();
     };
 
+    mqtt.subscribe(topic_prefix + "alarm/command", [](const char *, Stream & stream) {
+
+        if (!dsc.keybusConnected || dsc.disabled[partition]) {
+            syslog.println(F("Ignoring command -- partition disabled or keybus not connected."));
+            return;
+        }
+
+        JsonDocument json;
+
+        if (deserializeJson(json, stream)) {
+            syslog.println(F("Ignoring command -- JSON decoding failed"));
+            return;
+        }
+
+        const bool armed = dsc.armed[partition] || dsc.exitDelay[partition] || dsc.entryDelay[partition];
+
+        const String action = json["action"].as<String>();
+
+        dsc.writePartition = partition + 1;
+
+        if (!armed && (action == "ARM_AWAY")) {
+            syslog.println(F("Arming"));
+            dsc.write("w", true);
+        } else if (!armed && (action == "ARM_HOME")) {
+            syslog.println(F("Arming (stay)"));
+            dsc.write("s", true);
+        } else if (armed && (action == "DISARM")) {
+            const String code = json["code"].as<String>();
+
+            // code must be 4 chars long
+            if (code.length() != 4) {
+                syslog.println(F("Ignoring command -- invalid code length"));
+                return;
+            }
+
+            // code must be only digits
+            for (unsigned int idx = 0; idx < 4; ++idx) {
+                const char c = code[idx];
+                const bool isdigit = (c >= '0') && (c <= '9');
+                if (!isdigit) {
+                    syslog.println(F("Ignoring command -- invalid chars in code"));
+                    return;
+                }
+            }
+
+            syslog.println(F("Disarming"));
+            dsc.write(code.c_str(), true);
+        }
+
+    });
+
     mqtt.begin();
 
     ArduinoOTA.setHostname(hostname.c_str());
@@ -353,7 +408,6 @@ void setup() {
     ArduinoOTA.onError([](uint8_t) { dsc.begin(); });
     ArduinoOTA.begin();
 
-    dsc.writePartition = partition;
     dsc.begin();
 }
 
