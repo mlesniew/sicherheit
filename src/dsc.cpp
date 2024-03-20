@@ -45,12 +45,15 @@ void update_bool(const bool & value, bool & changed, const bool force, const Str
 }
 
 void update_bitmask(const byte values[], bool & global_changed, byte changed[], std::map<int, String> ids,
-                    const bool force, const String & topic) {
+                    const bool force, const String & topic, const String & topic_global = "") {
+
     if (!global_changed && !force) {
         return;
     }
 
     global_changed = false;
+
+    bool any = false;
 
     for (const auto & element : ids) {
         const auto idx = element.first - 1;
@@ -59,8 +62,14 @@ void update_bitmask(const byte values[], bool & global_changed, byte changed[], 
         const byte mask = 1 << position;
         if ((changed[group] & mask) || force) {
             changed[group] &= ~mask;
-            mqtt.publish(topic_prefix + topic + String(element.first), values[group] & mask ? "ON" : "OFF", 0, true);
+            const bool active = values[group] & mask;
+            mqtt.publish(topic_prefix + topic + String(element.first), active ? "ON" : "OFF", 0, true);
+            any = any || active;
         }
+    }
+
+    if (topic_global.length()) {
+        mqtt.publish(topic_prefix + topic_global, any ? "ON" : "OFF", 0, true);
     }
 }
 
@@ -121,7 +130,7 @@ void update(const bool force = false) {
         }
     }
 
-    update_bitmask(dsc.openZones, dsc.openZonesStatusChanged, dsc.openZonesChanged, zones, force, "zone/motion/");
+    update_bitmask(dsc.openZones, dsc.openZonesStatusChanged, dsc.openZonesChanged, zones, force, "zone/motion/", "motion");
     update_bitmask(dsc.alarmZones, dsc.alarmZonesStatusChanged, dsc.alarmZonesChanged, zones, force, "zone/alarm/");
     update_bitmask(dsc.pgmOutputs, dsc.pgmOutputsStatusChanged, dsc.pgmOutputsChanged, pgm, force, "pgm/");
 }
@@ -250,13 +259,15 @@ void autodiscovery() {
         const char * name;
         const char * friendly_name;
         const char * device_class;
+        bool diagnostic;
     };
 
     static const BinarySensor binary_sensors[] = {
-        {"trouble", "Trouble", "problem"},
-        {"battery_trouble", "Battery", "problem"},
-        {"power_trouble", "Power", "problem"},
-        {"connected", "Keybus", "connectivity"},
+        {"trouble", "Trouble", "problem", false},
+        {"battery_trouble", "Battery", "problem", true},
+        {"power_trouble", "Power", "problem", true},
+        {"connected", "Keybus", "connectivity", true},
+        {"motion", "Motion", "motion", false},
     };
 
     for (const auto & binary_sensor : binary_sensors) {
@@ -266,7 +277,9 @@ void autodiscovery() {
         json["object_id"] = String("keybus_") + binary_sensor.name;
         json["name"] = binary_sensor.friendly_name;
         json["device_class"] = binary_sensor.device_class;
-        json["entity_category"] = "diagnostic";
+        if (binary_sensor.diagnostic) {
+            json["entity_category"] = "diagnostic";
+        }
         json["availability_topic"] = mqtt.will.topic;
         json["state_topic"] = topic_prefix + binary_sensor.name;
 
