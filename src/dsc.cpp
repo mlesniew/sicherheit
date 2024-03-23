@@ -192,7 +192,7 @@ void autodiscovery() {
         const auto unique_id_base = board_unique_id + "-zone-" + String(zone_id);
 
         JsonDocument device;
-        device["name"] = String(zone_name);
+        device["name"] = "Motion Sensor " + String(zone_name);
         device["suggested_area"] = zone_name;
         device["identifiers"][0] = unique_id_base + "-motion-sensor";
         device["via_device"] = board_unique_id;
@@ -202,6 +202,8 @@ void autodiscovery() {
 
             JsonDocument json;
 
+            json["name"] = nullptr;
+            json["object_id"] = "Motion " + zone_name;
             json["unique_id"] = unique_id;
             json["availability_topic"] = mqtt.will.topic;
             json["device_class"] = "motion";
@@ -220,6 +222,7 @@ void autodiscovery() {
             JsonDocument json;
 
             json["unique_id"] = unique_id;
+            json["object_id"] = "Alarm " + zone_name;
             json["name"] = "Alarm";
             json["availability_topic"] = mqtt.will.topic;
             json["device_class"] = "safety";
