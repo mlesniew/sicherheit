@@ -5,8 +5,9 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
-#include <PicoSyslog.h>
 #include <PicoMQTT.h>
+#include <PicoSlugify.h>
+#include <PicoSyslog.h>
 #include <PicoUtils.h>
 #include <dscKeybusInterface.h>
 
@@ -31,7 +32,7 @@ std::map<int, String> zones;
 std::map<int, String> pgm;
 
 const String board_id(ESP.getChipId(), HEX);
-const String topic_prefix = "keybus/" + board_id + "/";
+String mqtt_topic_prefix = "keybus/" + board_id + "/";
 
 const char CONFIG_FILE[] PROGMEM = "/config.json";
 
@@ -41,11 +42,12 @@ void update_bool(const bool & value, bool & changed, const bool force, const Str
     }
 
     changed = false;
-    mqtt.publish(topic_prefix + topic, value ? "ON" : "OFF", 0, true);
+    mqtt.publish(mqtt_topic_prefix + topic, value ? "ON" : "OFF", 0, true);
 }
 
 void update_bitmask(const byte values[], bool & global_changed, byte changed[], std::map<int, String> ids,
-                    const bool force, const String & topic, const String & topic_global = "") {
+                    const bool force, const String & topic_prefix, const String & topic_suffix = "",
+                    const String & topic_global = "") {
 
     if (!global_changed && !force) {
         return;
@@ -63,13 +65,14 @@ void update_bitmask(const byte values[], bool & global_changed, byte changed[], 
         if ((changed[group] & mask) || force) {
             changed[group] &= ~mask;
             const bool active = values[group] & mask;
-            mqtt.publish(topic_prefix + topic + String(element.first), active ? "ON" : "OFF", 0, true);
+            mqtt.publish(mqtt_topic_prefix + topic_prefix + PicoSlugify::slugify(element.second) + topic_suffix,
+                         active ? "ON" : "OFF", 0, true);
             any = any || active;
         }
     }
 
     if (topic_global.length()) {
-        mqtt.publish(topic_prefix + topic_global, any ? "ON" : "OFF", 0, true);
+        mqtt.publish(mqtt_topic_prefix + topic_global, any ? "ON" : "OFF", 0, true);
     }
 }
 
@@ -126,12 +129,13 @@ void update(const bool force = false) {
             dsc.exitDelayChanged[partition] = false;
             dsc.fireChanged[partition] = false;
 
-            mqtt.publish(topic_prefix + "alarm", get_state(), 0, true);
+            mqtt.publish(mqtt_topic_prefix + "alarm", get_state(), 0, true);
         }
     }
 
-    update_bitmask(dsc.openZones, dsc.openZonesStatusChanged, dsc.openZonesChanged, zones, force, "zone/motion/", "motion");
-    update_bitmask(dsc.alarmZones, dsc.alarmZonesStatusChanged, dsc.alarmZonesChanged, zones, force, "zone/alarm/");
+    update_bitmask(dsc.openZones, dsc.openZonesStatusChanged, dsc.openZonesChanged, zones, force, "zone/", "/motion",
+                   "motion");
+    update_bitmask(dsc.alarmZones, dsc.alarmZonesStatusChanged, dsc.alarmZonesChanged, zones, force, "zone/", "/alarm");
     update_bitmask(dsc.pgmOutputs, dsc.pgmOutputsStatusChanged, dsc.pgmOutputsChanged, pgm, force, "pgm/");
 }
 
@@ -139,7 +143,7 @@ PicoUtils::Watch<bool> connected_watch(
     [] { return dsc.keybusConnected; },
 [](bool connected) {
     keybus_led_blinker.set_pattern(connected ? 1 : 0b10);
-    mqtt.publish(topic_prefix + "connected", connected ? "ON" : "OFF", 0, true);
+    mqtt.publish(mqtt_topic_prefix + "connected", connected ? "ON" : "OFF", 0, true);
 });
 
 namespace HomeAssistant {
@@ -171,8 +175,8 @@ void autodiscovery() {
         json["code"] = "REMOTE_CODE";
         json["code_arm_required"] = false;
         json["code_disarm_required"] = true;
-        json["state_topic"] = topic_prefix + "alarm";
-        json["command_topic"] = topic_prefix + "alarm/command";
+        json["state_topic"] = mqtt_topic_prefix + "alarm";
+        json["command_topic"] = mqtt_topic_prefix + "alarm/command";
         json["command_template"] = "{ \"action\": \"{{ action }}\", \"code\": \"{{ code }}\" }";
         json["supported_features"][0] = "arm_home";
         json["supported_features"][1] = "arm_away";
@@ -188,6 +192,7 @@ void autodiscovery() {
     for (const auto & zone : zones) {
         const auto & zone_id = zone.first;
         const auto & zone_name = zone.second;
+        const String zone_name_slug = PicoSlugify::slugify(zone_name);
 
         const auto unique_id_base = board_unique_id + "-zone-" + String(zone_id);
 
@@ -197,18 +202,20 @@ void autodiscovery() {
         device["identifiers"][0] = unique_id_base + "-motion-sensor";
         device["via_device"] = board_unique_id;
 
+
         {
             const auto unique_id = unique_id_base + "-motion";
 
             JsonDocument json;
 
             json["name"] = nullptr;
-            json["object_id"] = "Motion " + zone_name;
+            json["default_entity_id"] = "binary_sensor.motion_" + zone_name_slug;
             json["unique_id"] = unique_id;
             json["availability_topic"] = mqtt.will.topic;
             json["device_class"] = "motion";
-            json["state_topic"] = topic_prefix + "zone/motion/" + String(zone_id);
+            json["state_topic"] = mqtt_topic_prefix + "zone/" + zone_name_slug + "/motion";
             json["device"] = device;
+            json["platform"] = "binary_sensor";
 
             const String disco_topic = "homeassistant/binary_sensor/" + unique_id + "/config";
             auto publish = mqtt.begin_publish(disco_topic, measureJson(json), 0, true);
@@ -221,13 +228,14 @@ void autodiscovery() {
 
             JsonDocument json;
 
-            json["unique_id"] = unique_id;
-            json["object_id"] = "Alarm " + zone_name;
             json["name"] = "Alarm";
+            json["unique_id"] = unique_id;
+            json["default_entity_id"] = "binary_sensor.alarm_" + zone_name_slug;
             json["availability_topic"] = mqtt.will.topic;
             json["device_class"] = "safety";
-            json["state_topic"] = topic_prefix + "zone/alarm/" + String(zone_id);
+            json["state_topic"] = mqtt_topic_prefix + "zone/" + zone_name_slug + "/alarm";
             json["device"] = device;
+            json["platform"] = "binary_sensor";
 
             const String disco_topic = "homeassistant/binary_sensor/" + unique_id + "/config";
             auto publish = mqtt.begin_publish(disco_topic, measureJson(json), 0, true);
@@ -248,7 +256,7 @@ void autodiscovery() {
         json["unique_id"] = unique_id;
         json["name"] = name;
         json["availability_topic"] = mqtt.will.topic;
-        json["state_topic"] = topic_prefix + "pgm/" + String(id);
+        json["state_topic"] = mqtt_topic_prefix + "pgm/" + String(id);
 
         json["device"] = get_device();
 
@@ -277,14 +285,14 @@ void autodiscovery() {
         const auto unique_id = board_unique_id + "-" + binary_sensor.name;
         JsonDocument json;
         json["unique_id"] = unique_id;
-        json["object_id"] = String("keybus_") + binary_sensor.name;
+        json["default_entity_id"] = hostname + "_" + binary_sensor.name;
         json["name"] = binary_sensor.friendly_name;
         json["device_class"] = binary_sensor.device_class;
         if (binary_sensor.diagnostic) {
             json["entity_category"] = "diagnostic";
         }
         json["availability_topic"] = mqtt.will.topic;
-        json["state_topic"] = topic_prefix + binary_sensor.name;
+        json["state_topic"] = mqtt_topic_prefix + binary_sensor.name;
 
         json["device"] = get_device();
 
@@ -317,7 +325,8 @@ void load(const JsonDocument & config) {
     }
 
     syslog.server = config["syslog"] | "";
-    hostname = config["hostname"] | "dsc";
+    hostname = PicoSlugify::slugify(config["hostname"] | ("dsc-" + board_id));
+    mqtt_topic_prefix = "sicherheit/" + hostname + "/";
     partition = config["partition"] | 1;
 }
 
@@ -337,10 +346,6 @@ void setup() {
                     ));
 
     reset_button.init();
-    wifi_control.init(button);
-    wifi_control.get_connectivity_level = [] {
-        return mqtt.connected() ? 2 : 1;
-    };
 
     LittleFS.begin();
     {
@@ -348,8 +353,14 @@ void setup() {
         settings::load(config);
     }
 
-    mqtt.client_id = "keybus-" + board_id;
-    mqtt.will.topic = "keybus/" + board_id + "/availability";
+    WiFi.hostname(hostname);
+    wifi_control.init(button);
+    wifi_control.get_connectivity_level = [] {
+        return mqtt.connected() ? 2 : 1;
+    };
+
+    mqtt.client_id = "keybus-" + hostname;
+    mqtt.will.topic = mqtt_topic_prefix + "availability";
     mqtt.will.payload = "offline";
     mqtt.will.retain = true;
 
@@ -366,7 +377,7 @@ void setup() {
         connected_watch.fire();
     };
 
-    mqtt.subscribe(topic_prefix + "alarm/command", [](const char *, Stream & stream) {
+    mqtt.subscribe(mqtt_topic_prefix + "alarm/command", [](const char *, Stream & stream) {
 
         if (!dsc.keybusConnected || dsc.disabled[partition]) {
             syslog.println(F("Ignoring command -- partition disabled or keybus not connected."));
